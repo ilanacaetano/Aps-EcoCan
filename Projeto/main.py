@@ -11,7 +11,7 @@ from tkinter import Tk, Label, Button, filedialog, messagebox, Frame, Canvas, tt
 from PIL import Image, ImageTk, ImageOps
 
 # -------------------- CONFIGURAÇÕES --------------------
-DATA_DIR = './data'
+DATA_DIR = './Projeto/data'
 MODEL_PATH = 'modelo_latas_aug.pkl'
 
 # -------------------- LEITURA SEGURA --------------------
