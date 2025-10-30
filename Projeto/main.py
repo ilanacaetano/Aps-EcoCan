@@ -3,18 +3,23 @@ import cv2
 import joblib
 import numpy as np
 import threading
+import ttkbootstrap as tb
+from ttkbootstrap.constants import *
 from sklearn.model_selection import train_test_split
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score
-from tkinter import Tk, Label, Button, filedialog, messagebox, Frame, Canvas, ttk, Scrollbar
+from tkinter import filedialog, messagebox
 from PIL import Image, ImageTk, ImageOps
 
 # -------------------- CONFIGURAÇÕES --------------------
-DATA_DIR = './data'
+DATA_DIR = './Projeto/data'
 MODEL_PATH = 'modelo_latas_aug.pkl'
+RESULTADOS_DIR = './resultados'
+LOGO_PATH = 'Ecocan.png'
+os.makedirs(RESULTADOS_DIR, exist_ok=True)
 
-# -------------------- LEITURA SEGURA --------------------
+# -------------------- FUNÇÕES BASE --------------------
 def safe_imread(path):
     try:
         img_pil = Image.open(path).convert("RGB")
@@ -25,7 +30,6 @@ def safe_imread(path):
         print(f"[ERRO] Não foi possível abrir {path}: {e}")
         return None
 
-# -------------------- EXTRAÇÃO DE FEATURES (FILTROS MANUAIS) --------------------
 def aplicar_filtro(img, kernel):
     h, w = img.shape
     kh, kw = kernel.shape
@@ -39,35 +43,38 @@ def aplicar_filtro(img, kernel):
             output[i, j] = np.clip(valor, 0, 255)
     return output
 
+def segmentar_imagem(img_gray):
+    _, thresh = cv2.threshold(img_gray, 127, 255, cv2.THRESH_BINARY)
+    bordas = cv2.Canny(img_gray, 100, 200)
+    return thresh, bordas
+
 def extrair_features_filtros(img):
     img = cv2.resize(img, (100, 100))
-    img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape)==3 else img
-
-    # Filtros
+    img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     filtro_media = np.ones((3,3))/9
     filtro_sobel_x = np.array([[-1,0,1],[-2,0,2],[-1,0,1]])
     filtro_sobel_y = np.array([[-1,-2,-1],[0,0,0],[1,2,1]])
     filtro_laplaciano = np.array([[0,-1,0],[-1,4,-1],[0,-1,0]])
     filtro_sharpen = np.array([[0,-1,0],[-1,5,-1],[0,-1,0]])
-
     media = aplicar_filtro(img_gray, filtro_media)
     sobel = aplicar_filtro(media, filtro_sobel_x) + aplicar_filtro(media, filtro_sobel_y)
     laplaciano = aplicar_filtro(media, filtro_laplaciano)
     sharpen = aplicar_filtro(media, filtro_sharpen)
-
+    thresh, bordas = segmentar_imagem(img_gray)
     features = [
         np.mean(media), np.std(media),
         np.mean(sobel), np.std(sobel),
         np.mean(laplaciano), np.std(laplaciano),
-        np.mean(sharpen), np.std(sharpen)
+        np.mean(sharpen), np.std(sharpen),
+        np.mean(thresh), np.std(thresh),
+        np.mean(bordas), np.std(bordas)
     ]
     return np.array(features)
 
-# -------------------- DATA AUGMENTATION --------------------
 def gerar_augmentations(img):
     pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
     imgs_aug = [
-        np.array(cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)),  # original
+        np.array(cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)),
         np.array(cv2.cvtColor(np.array(pil_img.rotate(90)), cv2.COLOR_RGB2BGR)),
         np.array(cv2.cvtColor(np.array(pil_img.rotate(180)), cv2.COLOR_RGB2BGR)),
         np.array(cv2.cvtColor(np.array(pil_img.rotate(270)), cv2.COLOR_RGB2BGR)),
@@ -79,18 +86,12 @@ def gerar_augmentations(img):
 # -------------------- TREINAMENTO --------------------
 def treinar_modelo():
     try:
-        label_status["text"] = "Treinando modelo... (aguarde)"
-        root.update()
-
+        label_status.configure(text="Treinando modelo... (aguarde)")
+        app.update()
         features, labels = [], []
-        image_names = []
-
-        # Contar total de imagens para progress bar
         total_imgs = sum([len([f for f in os.listdir(os.path.join(DATA_DIR,d)) if f.lower().endswith(('.jpg','.png','.jpeg'))])
                           for d in os.listdir(DATA_DIR) if os.path.isdir(os.path.join(DATA_DIR,d))])
-        progress["maximum"] = total_imgs
-        progress["value"] = 0
-
+        progress.configure(maximum=total_imgs, value=0)
         for class_name in os.listdir(DATA_DIR):
             class_path = os.path.join(DATA_DIR, class_name)
             if os.path.isdir(class_path):
@@ -104,78 +105,28 @@ def treinar_modelo():
                                 feat = extrair_features_filtros(img_aug)
                                 features.append(feat)
                                 labels.append(label_value)
-                                image_names.append(filename)
-                            progress["value"] += 1
-                            root.update()
-
+                            progress.step()
+                            app.update()
         if len(features) < 10:
-            messagebox.showerror("Erro", "Poucas amostras. Coloque imagens em 'data/latas' e 'data/outros'.")
-            label_status["text"] = "Erro: poucas imagens."
+            messagebox.showerror("Erro", "Poucas amostras em 'data/latas' e 'data/outros'.")
+            label_status.configure(text="Erro: poucas imagens.")
             return
-
         X = np.array(features)
         y = np.array(labels)
-
         scaler = StandardScaler()
         X = scaler.fit_transform(X)
-
-        X_train, X_test, y_train, y_test, train_names, test_names = train_test_split(
-            X, y, image_names, test_size=0.2, random_state=50)
-
-        model = SVC(kernel='linear', C=1.0, random_state=50)
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        model = SVC(kernel='linear', C=1.0)
         model.fit(X_train, y_train)
-
         y_pred = model.predict(X_test)
         acc = accuracy_score(y_test, y_pred) * 100
-
         joblib.dump((model, scaler), MODEL_PATH)
-
-        # Mostrar dados treino/teste
-        mostrar_dados_treino_teste(train_names, y_train, test_names, y_test)
-
-        label_status["text"] = f"Modelo treinado com sucesso! Acurácia: {acc:.2f}%"
+        label_status.configure(text=f"Modelo treinado com sucesso! Acurácia: {acc:.2f}%")
         messagebox.showinfo("Sucesso", f"Modelo treinado!\nAcurácia: {acc:.2f}%")
-
     except Exception as e:
         messagebox.showerror("Erro no treinamento", str(e))
-        label_status["text"] = "Erro ao treinar modelo."
+        label_status.configure(text="Erro ao treinar modelo.")
 
-# -------------------- MOSTRAR DADOS TREINO/TESTE --------------------
-def mostrar_dados_treino_teste(train_names, y_train, test_names, y_test):
-    janela = Tk()
-    janela.title("Dados de Treino e Teste")
-    janela.geometry("500x400")
-
-    frame = Frame(janela)
-    frame.pack(fill='both', expand=True)
-
-    # Scrollbar vertical
-    canvas = Canvas(frame)
-    scrollbar = Scrollbar(frame, orient="vertical", command=canvas.yview)
-    scroll_frame = Frame(canvas)
-    scroll_frame.bind(
-        "<Configure>",
-        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-    )
-    canvas.create_window((0,0), window=scroll_frame, anchor="nw")
-    canvas.configure(yscrollcommand=scrollbar.set)
-
-    Label(scroll_frame, text="Treino:", font=("Arial",12,"bold")).pack()
-    for n,lbl in zip(train_names, y_train):
-        texto = f"{n} - {'LATA' if lbl==0 else 'OUTRO'}"
-        Label(scroll_frame, text=texto).pack()
-
-    Label(scroll_frame, text="--- Teste ---", font=("Arial",12,"bold")).pack(pady=5)
-    for n,lbl in zip(test_names, y_test):
-        texto = f"{n} - {'LATA' if lbl==0 else 'OUTRO'}"
-        Label(scroll_frame, text=texto).pack()
-
-    canvas.pack(side="left", fill="both", expand=True)
-    scrollbar.pack(side="right", fill="y")
-
-    janela.mainloop()
-
-# -------------------- CARREGAR MODELO --------------------
 def carregar_modelo():
     if not os.path.exists(MODEL_PATH):
         messagebox.showerror("Erro", "Modelo não encontrado. Treine primeiro!")
@@ -183,73 +134,125 @@ def carregar_modelo():
     model, scaler = joblib.load(MODEL_PATH)
     return model, scaler
 
-# -------------------- CLASSIFICAÇÃO --------------------
 def classificar_imagem(img_path):
     model, scaler = carregar_modelo()
     if model is None:
         return
-
     img = safe_imread(img_path)
-    if img is None:
-        messagebox.showerror("Erro", f"Não foi possível abrir a imagem:\n{img_path}")
-        label_status["text"] = "Erro: imagem não aberta."
-        return
-
     feat = extrair_features_filtros(img)
     feat = scaler.transform([feat])
     pred = model.predict(feat)[0]
-
-    resultado = "LATA" if pred==0 else "OUTRO"
-    label_status["text"] = f"Resultado: {resultado}"
-
+    resultado = "LATA" if pred == 0 else "OUTRO"
+    label_status.configure(text=f"Resultado: {resultado}")
     exibir_imagem(img_path, resultado)
 
-# -------------------- INTERFACE --------------------
 def selecionar_imagem():
     file_path = filedialog.askopenfilename(filetypes=[("Imagens", "*.jpg *.png *.jpeg")])
     if file_path:
-        label_status["text"] = "Classificando imagem..."
-        root.update()
+        label_status.configure(text="Classificando imagem...")
+        app.update()
         classificar_imagem(file_path)
 
 def exibir_imagem(img_path, resultado_texto):
     img = Image.open(img_path)
-    img = img.resize((250,250))
+    img = img.resize((250, 250))
     tk_img = ImageTk.PhotoImage(img)
-
-    canvas_imagem.create_image(0,0,anchor="nw",image=tk_img)
+    canvas_imagem.create_image(0, 0, anchor="nw", image=tk_img)
     canvas_imagem.image = tk_img
-    label_resultado["text"] = resultado_texto
+    label_resultado.configure(text=resultado_texto)
+
+def visualizar_filtros():
+    arquivos = [f for f in os.listdir(RESULTADOS_DIR) if f.endswith(".jpg")]
+    if not arquivos:
+        messagebox.showinfo("Aviso", "Nenhum filtro salvo ainda.")
+        return
+    for f in arquivos:
+        img = cv2.imread(os.path.join(RESULTADOS_DIR, f))
+        cv2.imshow(f, img)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
 def thread_treinar():
     t = threading.Thread(target=treinar_modelo)
     t.start()
 
-# -------------------- GUI --------------------
-root = Tk()
-root.title("Detector de Latas")
-root.geometry("600x550")
-root.resizable(False, False)
+# -------------------- INTERFACE (TTKBOOTSTRAP) --------------------
+app = tb.Window(themename="minty")
+app.title("EcoCan - Tecnologia Sustentável")
+app.geometry("650x700")
+app.resizable(False, False)
 
-frame_top = Frame(root)
-frame_top.pack(pady=10)
+# -------------------- LOGO ECOCAN --------------------
+try:
+    logo_path = os.path.join(os.getcwd(), LOGO_PATH)
+    if not os.path.exists(logo_path):
+        raise FileNotFoundError(f"Logo não encontrada em: {logo_path}")
+    logo_img = Image.open(logo_path).convert("RGBA")
+    logo_img = logo_img.resize((320, 220))
+    logo_tk = ImageTk.PhotoImage(logo_img)
+    lbl_logo = tb.Label(app, image=logo_tk)
+    lbl_logo.image = logo_tk
+    lbl_logo.pack(pady=(25, 10))
+except Exception as e:
+    print(f"[AVISO] Falha ao carregar logo: {e}")
+    lbl_logo = tb.Label(app, text="EcoCan", font=("Segoe UI", 26, "bold"), bootstyle="success")
+    lbl_logo.pack(pady=(25, 10))
 
-btn_treinar = Button(frame_top, text="Treinar Modelo", command=thread_treinar, bg="#4CAF50", fg="white", width=15)
-btn_treinar.grid(row=0, column=0, padx=10)
+# -------------------- TÍTULO --------------------
+lbl_titulo = tb.Label(app, text="Tecnologia em prol da Reciclagem Sustentável",
+                      font=("Segoe UI", 15, "bold"))
+lbl_titulo.pack(pady=(0, 20))
 
-btn_classificar = Button(frame_top, text="Selecionar Imagem", command=selecionar_imagem, bg="#2196F3", fg="white", width=15)
-btn_classificar.grid(row=0, column=1, padx=10)
+# -------------------- BOTÕES VERDES ARREDONDADOS --------------------
+frame_btns = tb.Frame(app)
+frame_btns.pack(pady=9)
 
-label_status = Label(root, text="Aguardando ação...", fg="gray", font=("Arial", 11))
-label_status.pack(pady=5)
+verde_principal = "#56cc9d"
+verde_hover = "#D9F1DA"
 
-progress = ttk.Progressbar(root, orient="horizontal", length=400, mode="determinate")
-progress.pack(pady=5)
+def estilizar_botao(btn):
+    btn.configure(
+        bootstyle="success",
+        width=15,
+        cursor="hand2",
+        style="Custom.TButton"
+    )
+    btn.bind("<Enter>", lambda e: btn.configure(style="Hover.TButton"))
+    btn.bind("<Leave>", lambda e: btn.configure(style="Custom.TButton"))
 
-canvas_imagem = Canvas(root, width=250, height=250, bg="#EEE")
-canvas_imagem.pack(pady=10)
+# Criar estilo personalizado
+style = tb.Style()
+style.configure("Custom.TButton", background=verde_principal, foreground="white",
+                font=("Segoe UI", 10, "bold"), borderwidth=0, relief="flat",
+                focusthickness=3, focuscolor=verde_principal, padding=10, border=0)
+style.map("Custom.TButton", relief=[("pressed", "flat")])
+style.configure("Hover.TButton", background=verde_hover, foreground="white",
+                font=("Segoe UI", 10, "bold"), padding=10)
 
-label_resultado = Label(root, text="", font=("Arial",14,"bold"))
-label_resultado.pack(pady=5)
+btn_treinar = tb.Button(frame_btns, text="Treinar Modelo", command=thread_treinar)
+btn_classificar = tb.Button(frame_btns, text="Selecionar Imagem", command=selecionar_imagem)
+btn_filtros = tb.Button(frame_btns, text="Ver Filtros", command=visualizar_filtros)
 
-root.mainloop()
+for i, btn in enumerate([btn_treinar, btn_classificar, btn_filtros]):
+    btn.grid(row=0, column=i, padx=10)
+    estilizar_botao(btn)
+
+# -------------------- MOLDURA IMAGEM VERDE --------------------
+frame_img = tb.Frame(app, bootstyle="success", padding=8)
+frame_img.pack(pady=20)
+
+canvas_imagem = tb.Canvas(frame_img, width=250, height=250, background="#C8E6C9", highlightthickness=0)
+canvas_imagem.pack()
+
+# -------------------- RESULTADO / STATUS --------------------
+label_resultado = tb.Label(app, text="", font=("Segoe UI", 14, "bold"))
+label_resultado.pack(pady=(10, 5))
+
+label_status = tb.Label(app, text="Aguardando ação...", font=("Segoe UI", 10))
+label_status.pack(pady=(5, 10))
+
+# -------------------- BARRA DE PROGRESSO --------------------
+progress = tb.Progressbar(app, orient="horizontal", length=400, mode="determinate", bootstyle=SUCCESS)
+progress.pack(pady=(5, 20))
+
+app.mainloop()
