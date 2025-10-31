@@ -1,4 +1,4 @@
-# Aps-EcoCan: Tecnologia em Prol da Reciclagem Sustentável
+# EcoCan: Tecnologia em Prol da Reciclagem Sustentável
 
 ## ♻️ Visão Geral do Projeto
 
